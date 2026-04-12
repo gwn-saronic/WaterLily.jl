@@ -1,0 +1,547 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, bm}
+\usepackage{algorithm, algpseudocode}
+\usepackage{newtxtext,newtxmath}
+\usepackage{hyperref}
+
+\title{Adjoint Sensitivity Formulation for WaterLily.jl}
+\author{}
+\date{}
+
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\dd}{\,\mathrm{d}}
+\newcommand{\pp}{\partial}
+
+\begin{document}
+\maketitle
+
+%----------------------------------------------------------------------
+\section{Governing Equations}
+%----------------------------------------------------------------------
+
+WaterLily.jl solves the incompressible Navier--Stokes equations on a
+Cartesian grid with immersed boundaries modelled via the Boundary Data
+Immersion Method (BDIM)~\cite{Maertens2015}.
+
+\subsection{Continuous equations}
+
+The incompressible Navier--Stokes equations in non-dimensional form are
+\begin{align}
+  \frac{\pp \vect{u}}{\pp t} + (\vect{u}\cdot\nabla)\vect{u}
+    &= -\nabla p + \nu\,\nabla^{2}\vect{u}, \label{eq:momentum}\\
+  \nabla\cdot\vect{u} &= 0. \label{eq:continuity}
+\end{align}
+Here $\vect{u}$ is the velocity vector, $p$ is the kinematic pressure, and
+$\nu$ is the kinematic viscosity.
+
+\subsection{BDIM immersed boundary treatment}
+
+Let $d(\vect{x})$ denote the signed distance from $\vect{x}$ to the body
+surface ($d>0$ in fluid, $d<0$ inside body), and define the zeroth-moment
+kernel
+\begin{equation}\label{eq:mu0}
+  \mu_0(d;\epsilon) = \operatorname{kern}_0\!\bigl(\operatorname{clamp}(d/\epsilon, -1, 1)\bigr),
+  \qquad
+  \operatorname{kern}_0(\hat d) = \tfrac{1}{2} + \tfrac{1}{2}\hat d
+    + \frac{\sin(\pi\hat d)}{2\pi},
+\end{equation}
+where $\epsilon$ is the immersion width (typically one cell).
+For a static body with zero velocity, the simplified (zeroth-order) BDIM
+predictor is
+\begin{equation}\label{eq:bdim_pred}
+  \vect{u}^{*} = \mu_0\bigl(\vect{u}^{n} + \Delta t\,\vect{f}^{n}\bigr),
+\end{equation}
+where $\vect{f}^{n}$ is the explicit convective--diffusive right-hand side
+evaluated at the old velocity $\vect{u}^{n}$.
+
+\subsection{Pressure projection}
+
+After the predictor, the velocity is projected onto the divergence-free
+subspace by solving a variable-coefficient Poisson equation
+\begin{equation}\label{eq:poisson}
+  \nabla\cdot\bigl(\mu_0\,\nabla\phi\bigr) = \nabla\cdot\vect{u}^{*}
+\end{equation}
+and correcting
+\begin{equation}\label{eq:proj}
+  \vect{u}^{n+1} = \vect{u}^{*} - \mu_0\,\nabla\phi,
+  \qquad
+  p^{n+1} = \phi/\Delta t.
+\end{equation}
+The $\mu_0$ weighting ensures that the pressure gradient vanishes inside
+the body, enforcing a no-slip condition without explicit forcing.
+
+%----------------------------------------------------------------------
+\section{Discrete Operators on the Staggered Grid}
+%----------------------------------------------------------------------
+
+WaterLily uses a staggered (MAC) grid with ghost cells.  For a domain of
+$N_1\times N_2$ interior cells, the arrays have size
+$\bar N_k = N_k + 2$ (one ghost cell on each side).
+
+\begin{itemize}
+  \item \textbf{Pressure} $p_I$, scalar at cell centres, $I\in\bar N_1\times\bar N_2$.
+  \item \textbf{Velocity} $u_{I,i}$, $i$-component at face $I$ in direction $i$.
+  \item \textbf{Interior pressure cells:} $I\in[2,\bar N_1{-}1]\times[2,\bar N_2{-}1]$.
+  \item \textbf{Interior velocity faces (component $i$):}
+    $I_k\in\begin{cases}[3,\bar N_k{-}1]&k=i,\\[2pt][2,\bar N_k{-}1]&k\neq i.\end{cases}$
+\end{itemize}
+
+The discrete gradient operator $\partial_i$ and divergence operator $\operatorname{div}$ are
+\begin{equation}
+  \partial_i p_I = p_I - p_{I-\delta_i},
+  \qquad
+  \operatorname{div}(I, \vect{u}) = \sum_{i=1}^{D}(u_{I+\delta_i,\,i} - u_{I,i}).
+\end{equation}
+
+The convective--diffusive flux is computed using a central-difference scheme
+(CDS) for the convective term and standard second-order finite differences
+for diffusion:
+\begin{equation}
+  f_{I,i} = -\sum_j\bigl[\phi^u_{j}(I,i) - \nu\,\partial_j u_{I,i}\bigr]
+    \quad\text{(conservative flux form)},
+\end{equation}
+where $\phi^u_j$ is the CDS flux $\phi^u = \bar u\cdot\tfrac{1}{2}(u_L+u_R)$.
+
+%----------------------------------------------------------------------
+\section{Boundary Conditions}
+%----------------------------------------------------------------------
+
+\begin{itemize}
+  \item \textbf{Velocity, normal component (Dirichlet):}
+    $u_{I,i} = U_i^{\mathrm{BC}}$ at boundary faces in direction $i$.
+  \item \textbf{Velocity, tangential component (Neumann):}
+    $u_{\text{ghost},i} = u_{\text{interior},i}$ (zero-gradient).
+  \item \textbf{Pressure (Neumann):}
+    Implicitly enforced by setting $\mu_0=0$ at domain boundaries,
+    so $\mu_0\,\partial_i p = 0$ there.
+  \item \textbf{Ghost pressure cells:}
+    Not modified by the solver; values persist from the previous step.
+\end{itemize}
+
+%----------------------------------------------------------------------
+\section{Primal (Forward) Solver Pseudo-Code}
+\label{sec:forward}
+
+The \emph{forward} (or \emph{primal}) solver computes the physical flow
+field by marching the Navier--Stokes equations forward in time.  This
+terminology distinguishes it from the \emph{adjoint} solver
+(Section~\ref{sec:adjoint}), which propagates sensitivity information
+backward through the time steps.  The analogy mirrors forward- versus
+reverse-mode algorithmic differentiation~\cite{Martins2021}.
+%----------------------------------------------------------------------
+
+\begin{algorithm}[H]
+\caption{One-step forward solve: \texttt{ns\_onestep!}}
+\label{alg:onestep}
+\begin{algorithmic}[1]
+\Require Previous state $\vect{y}^n = [\vect{u}^n;\,p^n]$, design variable $c_x$
+\Ensure  New state $\vect{y}^{n+1} = [\vect{u}^{n+1};\,p^{n+1}]$
+\State Unpack $\vect{u}^n, p^n$ from $\vect{y}^n$
+\State Construct body SDF: $d(\vect{x}) = \|\vect{x}-\vect{x}_c(c_x)\| - R$
+\State Compute $\mu_0$ via \texttt{measure!} using Eq.~\eqref{eq:mu0}
+\State Build multigrid Poisson solver with coefficient $L=\mu_0$
+\Statex
+\Comment{\textit{BDIM predictor}}
+\State Compute explicit RHS: $\vect{f}^n \gets \texttt{conv\_diff!}(\vect{u}^n)$ \Comment{CDS convection + diffusion}
+\ForAll{interior faces $(I,i)$}
+  \State $u^*_{I,i} \gets \mu_{0,I,i}\,(u^n_{I,i} + \Delta t\,f^n_{I,i})$
+  \Comment{Eq.~\eqref{eq:bdim_pred}}
+\EndFor
+\State Apply velocity BCs: \texttt{BC!}$(\vect{u}^*,\,\vect{U}^{\mathrm{BC}})$
+\Statex
+\Comment{\textit{Pressure projection}}
+\ForAll{interior pressure cells $I$}
+  \State $\sigma_I \gets \operatorname{div}(I, \vect{u}^*)$
+  \Comment{Divergence source}
+\EndFor
+\State $\phi \gets \texttt{solver!}(\nabla\cdot(\mu_0\nabla\phi)=\sigma;\;\mathrm{tol}=\varepsilon_{\mathrm{mach}})$
+  \Comment{Tight multigrid V-cycle}
+\ForAll{interior pressure cells $I$, directions $i$}
+  \State $u^{n+1}_{I,i} \gets u^*_{I,i} - \mu_{0,I,i}\,\partial_i\phi_I$
+  \Comment{Eq.~\eqref{eq:proj}}
+\EndFor
+\State $p \gets \phi / \Delta t$
+\State Apply velocity BCs: \texttt{BC!}$(\vect{u}^{n+1},\,\vect{U}^{\mathrm{BC}})$
+\Statex
+\Comment{\textit{Pressure pinning (removes constant null space)}}
+\State $p_{\mathrm{ref}} \gets p_{I_{\mathrm{pin}}}$
+\ForAll{interior pressure cells $I$}
+  \State $p_I \gets p_I - p_{\mathrm{ref}}$
+\EndFor
+\State Pack $\vect{y}^{n+1} \gets [\vect{u}^{n+1};\,p^{n+1}]$
+\end{algorithmic}
+\end{algorithm}
+
+%----------------------------------------------------------------------
+\section{Residual Formulation for the Adjoint}
+%----------------------------------------------------------------------
+
+The adjoint method requires a residual function
+$\vect{R}(\vect{y}^{n+1}, \vect{y}^{n}, \vect{x}_d)=\vect{0}$
+that is satisfied at the forward solution, following the discrete approach
+of Martins \& Ning~\cite{Martins2021}, Eq.~(6.37).
+
+\subsection{State vector layout}
+
+The state vector $\vect{y}\in\mathbb{R}^{n_y}$ concatenates the full
+velocity and pressure arrays, \emph{including ghost cells}:
+\begin{equation}\label{eq:state_vec}
+  \vect{y}
+  = \begin{bmatrix} \operatorname{vec}(\vect{u}) \\ \operatorname{vec}(p) \end{bmatrix}
+  = \begin{bmatrix}
+      \operatorname{vec}(u_{\cdot,1}) \\[2pt]
+      \operatorname{vec}(u_{\cdot,2}) \\[2pt]
+      \vdots \\[2pt]
+      \operatorname{vec}(u_{\cdot,D}) \\[2pt]
+      \operatorname{vec}(p)
+    \end{bmatrix}
+  \;\in\mathbb{R}^{n_y},
+  \qquad
+  n_y = (D+1)\,N_p,
+  \qquad
+  N_p = \prod_{k=1}^{D}\bar N_k.
+\end{equation}
+Here $N_p=\bar N_1 \bar N_2$ is the number of scalar DOFs per field
+(including ghosts), $N_u = D\,N_p$ is the total velocity DOF count,
+and $\operatorname{vec}(\cdot)$ denotes column-major flattening.
+
+\paragraph{Memory layout.}
+WaterLily stores $\vect{u}$ as a $(D{+}1)$-dimensional array of size
+$(\bar N_1, \bar N_2, D)$ and $p$ as a $D$-dimensional array of size
+$(\bar N_1, \bar N_2)$.  In Julia's column-major order the velocity
+component $u_{I,i}$ at multi-index $I=(I_1,I_2)$ maps to the linear
+index
+\begin{equation}\label{eq:lin_vel}
+  \ell^{u}(I, i) = (i-1)\,N_p + I_1 + (I_2-1)\,\bar N_1,
+  \qquad i=1,\ldots,D,
+\end{equation}
+and the pressure $p_I$ maps to
+\begin{equation}\label{eq:lin_prs}
+  \ell^{p}(I) = N_u + I_1 + (I_2-1)\,\bar N_1.
+\end{equation}
+Equivalently, $y[\ell^{u}(I,i)] = u_{I,i}$ and $y[\ell^{p}(I)] = p_I$.
+
+\paragraph{DOF classification.}
+Each entry of $\vect{y}$ falls into one of four categories, which
+determines which residual equation governs it:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llll}
+  \hline
+  \textbf{Block} & \textbf{Index range} & \textbf{Interior set}
+    & \textbf{Residual} \\
+  \hline
+  Velocity $u_{I,i}$
+    & $\ell^{u}(I,i)\in[1,N_u]$
+    & $I\in\texttt{inside\_u}(\bar N,i)$
+    & Eq.~\eqref{eq:res_mom} \\
+  \quad (ghost/BC)
+    &
+    & complement
+    & Eq.~\eqref{eq:res_bc_vel} \\
+  Pressure $p_I$
+    & $\ell^{p}(I)\in[N_u{+}1,\,n_y]$
+    & $I\in\texttt{inside}(p)$
+    & Eq.~\eqref{eq:res_cont} or \eqref{eq:res_pin} \\
+  \quad (ghost)
+    &
+    & complement
+    & Eq.~\eqref{eq:res_bc_prs} \\
+  \hline
+\end{tabular}
+\end{center}
+
+\paragraph{Concrete example ($D=2$, $N=(32,16)$).}
+With $\bar N = (34, 18)$: $N_p = 612$, $N_u = 1224$, $n_y = 1836$.
+The state vector is partitioned as
+\[
+  \underbrace{y_1,\ldots,y_{612}}_{u_{x}}
+  \;\;
+  \underbrace{y_{613},\ldots,y_{1224}}_{u_{y}}
+  \;\;
+  \underbrace{y_{1225},\ldots,y_{1836}}_{p}.
+\]
+
+\subsection{Residual equations}
+
+The residual vector $\vect{R}\in\mathbb{R}^{n_y}$ is indexed identically
+to $\vect{y}$: entry $R[\ell^{u}(I,i)]$ is the equation that governs
+$u_{I,i}$, and $R[\ell^{p}(I)]$ governs $p_I$.  The residual decomposes
+into five blocks, each zero at the forward solution.
+
+\subsubsection{Interior momentum}
+
+For each component $i$ and every interior face
+$I\in\texttt{inside\_u}(\bar N, i)$:
+\begin{equation}\label{eq:res_mom}
+  \boxed{%
+  R[\ell^{u}(I,i)]
+  = u^{n+1}_{I,i}
+  - \underbrace{\mu_0\bigl(u^n_{I,i} + \Delta t\,f^n_{I,i}\bigr)}_{\text{BDIM predictor}}
+  + \underbrace{\Delta t\,\mu_0\,\partial_i p^{n+1}_I}_{\text{pressure correction}}.}
+\end{equation}
+Here $\mu_0 = \mu_0\bigl(d(\vect{x}_{\mathrm{face}};\,c_x),\,\epsilon\bigr)$
+is evaluated at the face location and depends on $c_x$ through the signed
+distance~$d$.  The explicit flux $f^n_{I,i}$ depends only on
+$\vect{u}^{n}$ (the previous step), so the residual is linear in
+$\vect{u}^{n+1}$ and $p^{n+1}$.
+
+Expanding the pressure gradient:
+\begin{equation}
+  \Delta t\,\mu_0\,\partial_i p^{n+1}_I
+  = \Delta t\,\mu_0\bigl(p^{n+1}_I - p^{n+1}_{I-\delta_i}\bigr).
+\end{equation}
+
+\subsubsection{Interior continuity}
+
+For every interior pressure cell $I\in\texttt{inside}(p)$ that is
+\emph{not} pinned (see below):
+\begin{equation}\label{eq:res_cont}
+  \boxed{%
+  R[\ell^{p}(I)] = \operatorname{div}(I,\,\vect{u}^{n+1})
+  = \sum_{i=1}^{D}\bigl(u^{n+1}_{I+\delta_i,\,i} - u^{n+1}_{I,i}\bigr).}
+\end{equation}
+This equation involves only velocity, not pressure.
+
+\subsubsection{Pressure pinning}
+
+Two classes of interior pressure cells are \emph{pinned}
+($R[\ell^{p}(I)] = p^{n+1}_I$) instead of satisfying
+the continuity equation:
+\begin{equation}\label{eq:res_pin}
+  \boxed{R[\ell^{p}(I)] = p^{n+1}_{I}}
+  \qquad\text{if}\quad
+  I = I_{\mathrm{pin}}
+  \;\;\text{or}\;\;
+  d\bigl(\vect{x}_{\mathrm{center}}(I)\bigr) < -\bigl(\epsilon + \tfrac{1}{2}\bigr).
+\end{equation}
+
+\begin{itemize}
+  \item \textbf{Reference pin} ($I_{\mathrm{pin}}$, one cell):
+    Removes the constant null space of the discrete Laplacian under
+    all-Neumann pressure boundary conditions.  Since only pressure
+    \emph{gradients} appear in the momentum equations, a global
+    pressure shift does not affect the velocity field.  Pinning one
+    cell to zero selects the unique pressure that satisfies the
+    residual.
+
+  \item \textbf{Body-interior pins} (cells deep inside the body):
+    When $d < -(\epsilon+\frac{1}{2})$ at the cell centre, every
+    surrounding face has $d_{\mathrm{face}} < -\epsilon$, hence
+    $\mu_0 = \operatorname{kern}_0(-1) = 0$.  Pressure at these cells
+    does not appear in \emph{any} momentum equation (the gradient
+    coefficient $\Delta t\,\mu_0 = 0$ on all adjacent faces).
+    Without pinning, the corresponding columns of
+    $\pp\vect{R}/\pp\vect{y}$ are structurally zero and the Jacobian
+    is singular.
+\end{itemize}
+
+\subsubsection{Ghost/boundary velocity}
+
+All velocity DOFs \emph{outside} the interior set satisfy a boundary
+condition constraint:
+\begin{equation}\label{eq:res_bc_vel}
+  \boxed{R[\ell^{u}(I,i)] = u^{n+1}_{I,i} - \texttt{BC}\bigl(\vect{u}^{n+1}\bigr)_{I,i},}
+\end{equation}
+where $\texttt{BC}(\cdot)$ applies WaterLily's boundary condition
+operator to a copy of $\vect{u}^{n+1}$ and returns the expected
+ghost-cell value.  This captures both types of boundary condition:
+\begin{itemize}
+  \item \textbf{Dirichlet} (normal component, $i=j$ at boundary in
+    direction~$j$): $\texttt{BC}(\vect{u})_{I,i} = U_i^{\mathrm{BC}}$
+    (constant), so
+    $R = u^{n+1}_{I,i} - U_i^{\mathrm{BC}}$.
+  \item \textbf{Neumann} (tangential component, $i \neq j$):
+    $\texttt{BC}(\vect{u})_{I,i} = u^{n+1}_{I\pm\delta_j,\,i}$
+    (the interior neighbour), so
+    $R = u^{n+1}_{I,i} - u^{n+1}_{I\pm\delta_j,\,i}$.
+\end{itemize}
+
+\subsubsection{Ghost pressure}
+
+Pressure DOFs outside the interior set satisfy an identity constraint:
+\begin{equation}\label{eq:res_bc_prs}
+  \boxed{R[\ell^{p}(I)] = p^{n+1}_I - p^{n}_I.}
+\end{equation}
+Ghost pressure cells are not modified by the Poisson solver (boundary
+$\mu_0=0$ decouples them from the interior), and the pressure pinning
+shift is applied only to interior cells, so $p^{n+1}_I = p^{n}_I$ and
+$R=0$ at the forward solution.
+
+\subsection{Residual vector summary}
+
+Collecting the five blocks, the full residual vector reads
+\begin{equation}\label{eq:res_full}
+  \vect{R}(\vect{y}^{n+1},\vect{y}^{n},\vect{x}_d) =
+  \begin{bmatrix}
+    R[\ell^{u}(I,i)] \\[6pt] R[\ell^{p}(I)]
+  \end{bmatrix}
+  =
+  \begin{cases}
+    u^{n+1}_{I,i} - \mu_0(u^n_{I,i}+\Delta t\,f^n_{I,i})
+      + \Delta t\,\mu_0\,\partial_i p^{n+1}_I
+      & I\in\mathcal{U}_{\mathrm{int}}(i), \\[4pt]
+    u^{n+1}_{I,i} - \texttt{BC}(\vect{u}^{n+1})_{I,i}
+      & I\notin\mathcal{U}_{\mathrm{int}}(i), \\[8pt]
+    \operatorname{div}(I,\vect{u}^{n+1})
+      & I\in\mathcal{P}_{\mathrm{int}}\setminus\mathcal{P}_{\mathrm{pin}}, \\[4pt]
+    p^{n+1}_I
+      & I\in\mathcal{P}_{\mathrm{pin}}, \\[4pt]
+    p^{n+1}_I - p^{n}_I
+      & I\notin\mathcal{P}_{\mathrm{int}},
+  \end{cases}
+\end{equation}
+where
+$\mathcal{U}_{\mathrm{int}}(i) = \texttt{inside\_u}(\bar N,i)$,\;
+$\mathcal{P}_{\mathrm{int}} = \texttt{inside}(p)$,\;
+and
+$\mathcal{P}_{\mathrm{pin}} = \{I_{\mathrm{pin}}\}
+  \cup \{I : d(\vect{x}_{\mathrm{center}}(I)) < -(\epsilon+\tfrac{1}{2})\}$.
+
+%----------------------------------------------------------------------
+\section{Jacobian Structure}
+\label{sec:jacobian}
+%----------------------------------------------------------------------
+
+The Jacobian $\vect{J} = \pp\vect{R}/\pp\vect{y}^{n+1}$ has a
+$2\times2$ block structure when partitioned into velocity and pressure DOFs:
+\begin{equation}\label{eq:jacobian}
+  \vect{J} =
+  \begin{bmatrix}
+    \vect{J}_{uu} & \vect{J}_{up} \\[4pt]
+    \vect{J}_{pu} & \vect{J}_{pp}
+  \end{bmatrix}.
+\end{equation}
+The entries of each block follow directly from the
+residual~\eqref{eq:res_full}:
+
+\paragraph{$\vect{J}_{uu}$ (velocity--velocity).}
+Interior momentum rows have
+$\pp R^{\mathrm{mom}}_{I,i}/\pp u^{n+1}_{I,i} = 1$ on the diagonal;
+all off-diagonal entries are zero because the predictor depends on
+$\vect{u}^n$, not $\vect{u}^{n+1}$.
+Ghost Dirichlet rows contribute $+1$ on the diagonal.
+Ghost Neumann rows have $+1$ on the diagonal and $-1$ at the interior
+neighbour.  Hence $\vect{J}_{uu}\approx\vect{I}$.
+
+\paragraph{$\vect{J}_{up}$ (velocity--pressure).}
+Interior momentum rows have two entries per row from the pressure gradient:
+\[
+  \frac{\pp R^{\mathrm{mom}}_{I,i}}{\pp p^{n+1}_I} = +\Delta t\,\mu_0,
+  \qquad
+  \frac{\pp R^{\mathrm{mom}}_{I,i}}{\pp p^{n+1}_{I-\delta_i}} = -\Delta t\,\mu_0.
+\]
+Ghost velocity rows contribute zero (boundary conditions do not depend on
+pressure).  Thus $\vect{J}_{up} = \Delta t\,\mu_0\,\vect{G}$ where
+$\vect{G}$ is the discrete gradient operator.
+
+\paragraph{$\vect{J}_{pu}$ (pressure--velocity).}
+Continuity rows contribute the discrete divergence stencil ($\pm 1$
+entries).  Pinned pressure rows and ghost pressure rows contribute zero.
+Thus $\vect{J}_{pu} = \vect{D}$ (with rows zeroed for pinned cells),
+where $\vect{D}$ is the discrete divergence operator.
+
+\paragraph{$\vect{J}_{pp}$ (pressure--pressure).}
+Continuity rows have no pressure dependence: $\vect{0}$.
+Pinned rows (reference pin + body-interior) have $+1$ on the diagonal.
+Ghost pressure identity rows have $+1$ on the diagonal.
+
+\paragraph{Full structure.}
+Ordering DOFs as
+(ghost $u$, interior $u$, ghost $p$, pinned $p$, interior $p$):
+\begin{equation}
+  \vect{J} \sim
+  \begin{bmatrix}
+    \vect{I}_{\mathrm{bc}} & * & \vect{0} & \vect{0} & \vect{0} \\
+    \vect{0} & \vect{I} & \vect{0} & \Delta t\,\mu_0\,\vect{G}_{\mathrm{pin}} & \Delta t\,\mu_0\,\vect{G}_{\mathrm{int}} \\
+    \vect{0} & \vect{0} & \vect{I} & \vect{0} & \vect{0} \\
+    \vect{0} & \vect{0} & \vect{0} & \vect{I} & \vect{0} \\
+    \vect{0} & \vect{D} & \vect{0} & \vect{0} & \vect{0}
+  \end{bmatrix},
+\end{equation}
+where $\vect{I}_{\mathrm{bc}}$ has $+1$ on the diagonal with possible
+$-1$ off-diagonal entries from Neumann coupling, and $*$ denotes the
+Neumann coupling between ghost and interior velocity.
+
+The Schur complement for interior pressure, after eliminating velocity, is
+\begin{equation}
+  \vect{S} = -\vect{D}\,\vect{J}_{uu}^{-1}\,\Delta t\,\mu_0\,\vect{G}
+  \approx -\Delta t\,\nabla\cdot(\mu_0\,\nabla),
+\end{equation}
+which is the (negative) discrete weighted Laplacian.  Without pinning,
+$\vect{S}$ has a one-dimensional null space (constant pressure mode) plus
+additional null dimensions from body-interior cells.  The pinning
+equations replace the corresponding rows with $\vect{e}_I^{\top}$,
+lifting the rank deficiency.
+
+%----------------------------------------------------------------------
+\section{Adjoint Derivative Computation}
+\label{sec:adjoint}
+%----------------------------------------------------------------------
+
+Following Martins \& Ning~\cite{Martins2021}, \S6.7, the total derivative
+of a scalar objective $f(\vect{y},\vect{x}_d)$ with respect to the design
+variables is
+\begin{equation}\label{eq:total_deriv}
+  \frac{\dd f}{\dd \vect{x}_d}
+  = \frac{\pp f}{\pp \vect{x}_d}
+  - \bm{\psi}^{\!\top}\frac{\pp\vect{R}}{\pp\vect{x}_d},
+\end{equation}
+where the adjoint vector $\bm\psi$ satisfies the adjoint equation
+\begin{equation}\label{eq:adjoint_eq}
+  \vect{J}^{\top}\bm{\psi}
+  = \left(\frac{\pp f}{\pp\vect{y}}\right)^{\!\top}.
+\end{equation}
+
+\subsection{Unsteady adjoint via ImplicitAD.jl}
+
+For unsteady problems with $N_t$ time steps, ImplicitAD's
+\texttt{implicit\_unsteady} applies the discrete adjoint method
+time-step by time-step.  At each step $n$:
+
+\begin{enumerate}
+  \item Compute $\pp\vect{R}/\pp\vect{y}^{n+1}$ and
+    $\pp\vect{R}/\pp\vect{x}_d$ via forward-mode AD (ForwardDiff.jl).
+  \item Solve the adjoint linear system~\eqref{eq:adjoint_eq}.
+  \item Accumulate the sensitivity contribution~\eqref{eq:total_deriv}.
+\end{enumerate}
+
+The cost is independent of the number of design variables $n_x$ (one adjoint
+solve per function of interest), making it efficient for shape optimisation
+where $n_x\gg n_f$~\cite{Martins2021}.
+
+%----------------------------------------------------------------------
+\section{Verification Strategy}
+%----------------------------------------------------------------------
+
+\begin{enumerate}
+  \item \textbf{Residual check:}
+    Evaluate $\vect{R}(\vect{y}_{\mathrm{fwd}})$ at the forward solution
+    and verify $\|\vect{R}\|<\varepsilon$ (machine-precision for momentum
+    and ghost cells; Poisson-tolerance-limited for continuity).
+  \item \textbf{Adjoint gradient:}
+    Compute $\dd f/\dd c_x$ via ImplicitAD + ForwardDiff.
+  \item \textbf{Finite-difference verification:}
+    Central differences
+    $\dd f/\dd c_x \approx [f(c_x{+}h)-f(c_x{-}h)]/(2h)$
+    and check relative agreement $<5\%$.
+\end{enumerate}
+
+%----------------------------------------------------------------------
+\begin{thebibliography}{9}
+\bibitem{Maertens2015}
+  A.~P.~Maertens and G.~D.~Weymouth,
+  ``Accurate Cartesian-grid simulations of near-body flows at intermediate
+  Reynolds numbers,''
+  \emph{Comput.\ Methods Appl.\ Mech.\ Engrg.}, vol.~283, pp.~106--129, 2015.
+  \texttt{doi:10.1016/j.cma.2014.09.007}.
+
+\bibitem{Martins2021}
+  J.~R.~R.~A.~Martins and A.~Ning,
+  \emph{Engineering Design Optimization}.
+  Cambridge University Press, 2021, Ch.~6.
+\end{thebibliography}
+
+\end{document}
