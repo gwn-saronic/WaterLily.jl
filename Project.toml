@@ -1,13 +1,14 @@
 name = "WaterLily"
 uuid = "ed894a53-35f9-47f1-b17f-85db9237eebd"
-authors = ["Gabriel Weymouth <gabriel.weymouth@gmail.com>"]
 version = "1.6.1"
+authors = ["Gabriel Weymouth <gabriel.weymouth@gmail.com>"]
 
 [deps]
 ConstructionBase = "187b0558-2788-49d3-abe0-74a17ed4e7c9"
 DocStringExtensions = "ffbed154-4ef7-542d-bbb7-c09d3a79fcae"
 EllipsisNotation = "da5c29d0-fa7d-589e-88eb-ea29b0a81949"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+ImplicitAD = "e7cbb90b-9b31-4eb2-a8c8-45099c074ee1"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LoggingExtras = "e6f89c97-d47a-5376-807f-9c37f3926c36"
@@ -31,8 +32,8 @@ WriteVTK = "64499a7a-5c06-52f2-abe2-ccb03c286192"
 [extensions]
 WaterLilyAMDGPUExt = "AMDGPU"
 WaterLilyCUDAExt = "CUDA"
-WaterLilyMakieExt = "Makie"
 WaterLilyJLD2Ext = "JLD2"
+WaterLilyMakieExt = "Makie"
 WaterLilyMeshingExt = ["Makie", "Meshing"]
 WaterLilyPlotsExt = "Plots"
 WaterLilyReadVTKExt = "ReadVTK"
@@ -56,6 +57,7 @@ AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 GPUArrays = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
+ImplicitAD = "e7cbb90b-9b31-4eb2-a8c8-45099c074ee1"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
@@ -68,4 +70,4 @@ UnicodePlots = "b8865327-cd53-5732-bb35-84acbb429228"
 WriteVTK = "64499a7a-5c06-52f2-abe2-ccb03c286192"
 
 [targets]
-test = ["Test", "BenchmarkTools", "CUDA", "AMDGPU", "GPUArrays", "WriteVTK", "ReadVTK", "JLD2"]
+test = ["Test", "BenchmarkTools", "CUDA", "AMDGPU", "GPUArrays", "WriteVTK", "ReadVTK", "JLD2", "ImplicitAD"]

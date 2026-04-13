@@ -3,6 +3,7 @@
 \usepackage{amsmath, amssymb, bm}
 \usepackage{algorithm, algpseudocode}
 \usepackage{newtxtext,newtxmath}
+\usepackage{tikz}
 \usepackage{hyperref}
 
 \title{Adjoint Sensitivity Formulation for WaterLily.jl}
@@ -15,6 +16,8 @@
 
 \begin{document}
 \maketitle
+
+\tableofcontents
 
 %----------------------------------------------------------------------
 \section{Governing Equations}
@@ -47,6 +50,47 @@ kernel
     + \frac{\sin(\pi\hat d)}{2\pi},
 \end{equation}
 where $\epsilon$ is the immersion width (typically one cell).
+Figure~\ref{fig:mu0} plots $\mu_0$ as a function of $d/\epsilon$: it
+transitions smoothly from 0 (inside body) to 1 (fluid) over the
+immersion band $|d|<\epsilon$.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[>=stealth, xscale=1.1, yscale=1.0]
+  % Shading for body / immersion / fluid regions (behind axes)
+  \fill[red!10] (-3,0) rectangle (-1,2.5);
+  \fill[orange!10] (-1,0) rectangle (1,2.5);
+  \fill[blue!5] (1,0) rectangle (3.3,2.5);
+  % Region labels at top
+  \node[font=\footnotesize, red!70!black] at (-2,2.7) {body};
+  \node[font=\footnotesize, orange!70!black] at (0,2.7) {immersion};
+  \node[font=\footnotesize, blue!60!black] at (2.1,2.7) {fluid};
+  % Axes
+  \draw[->] (-3.2,0) -- (3.5,0) node[right] {$d/\epsilon$};
+  \draw[->] (-3,-0.2) -- (-3,3.0) node[above] {$\mu_0$};
+  % Tick marks on x-axis
+  \foreach \x/\lab in {-2/{-2}, -1/{-1}, 0/0, 1/1, 2/2}
+    \draw (\x,0.06) -- (\x,-0.06) node[below, font=\small] {$\lab$};
+  % Tick marks on y-axis
+  \draw (-3.06,2.2) -- (-2.94,2.2) node[left, font=\small] {$1$};
+  \draw (-3.06,1.1) -- (-2.94,1.1) node[left, font=\small] {$\tfrac{1}{2}$};
+  % mu0 curve (scaled to height 2.2)
+  \draw[blue!80!black, very thick] (-3,0) -- (-1,0);
+  \draw[blue!80!black, very thick, domain=-1:1, samples=80, smooth]
+    plot (\x, {2.2*(0.5 + 0.5*\x + 0.5*sin(180*\x)/3.14159)});
+  \draw[blue!80!black, very thick] (1,2.2) -- (3.3,2.2);
+  % Dashed lines at d/eps = -1, +1
+  \draw[dashed, gray] (-1,0) -- (-1,2.5);
+  \draw[dashed, gray] (1,0) -- (1,2.5);
+\end{tikzpicture}
+\caption{BDIM zeroth-moment kernel $\mu_0(d/\epsilon)$.
+  Inside the body ($d<-\epsilon$) $\mu_0=0$ forces $\vect{u}=\vect{0}$;
+  in the fluid ($d>\epsilon$) $\mu_0=1$ recovers the standard
+  Navier--Stokes equations; the smooth transition in
+  $|d|<\epsilon$ avoids Gibbs-type oscillations.}
+\label{fig:mu0}
+\end{figure}
+
 For a static body with zero velocity, the simplified (zeroth-order) BDIM
 predictor is
 \begin{equation}\label{eq:bdim_pred}
@@ -75,20 +119,110 @@ the body, enforcing a no-slip condition without explicit forcing.
 \section{Discrete Operators on the Staggered Grid}
 %----------------------------------------------------------------------
 
-WaterLily uses a staggered (MAC) grid with ghost cells.  For a domain of
-$N_1\times N_2$ interior cells, the arrays have size
-$\bar N_k = N_k + 2$ (one ghost cell on each side).
+\subsection{The MAC grid}
+
+WaterLily discretises the domain on a \emph{staggered} grid, commonly
+known as a Marker-And-Cell (MAC) grid~\cite{Harlow1965}.  Unlike a
+collocated arrangement (where all variables live at cell centres), the
+MAC grid stores velocity and pressure at different locations:
 
 \begin{itemize}
-  \item \textbf{Pressure} $p_I$, scalar at cell centres, $I\in\bar N_1\times\bar N_2$.
-  \item \textbf{Velocity} $u_{I,i}$, $i$-component at face $I$ in direction $i$.
-  \item \textbf{Interior pressure cells:} $I\in[2,\bar N_1{-}1]\times[2,\bar N_2{-}1]$.
+  \item \textbf{Pressure} $p_I$ is stored at \emph{cell centres}.
+  \item \textbf{Velocity component} $u_{I,i}$ is stored at the
+    \emph{face centre} of the cell face whose outward normal points in
+    direction~$i$.
+\end{itemize}
+
+\noindent
+For a single 2D cell at index $I=(I_1,I_2)$, the physical locations are
+(using WaterLily's \texttt{loc} convention, which subtracts $1.5$ for
+the ghost-cell offset):
+\begin{equation}\label{eq:loc}
+  \vect{x}^{p}_I = \bigl(I_1 - \tfrac{3}{2},\; I_2 - \tfrac{3}{2}\bigr),
+  \qquad
+  \vect{x}^{u_i}_I = \vect{x}^{p}_I - \tfrac{1}{2}\,\vect{e}_i,
+\end{equation}
+so each velocity component is shifted by $-\frac{1}{2}$ in its own
+direction relative to the cell centre.  Figure~\ref{fig:mac} shows the
+stencil for a single cell.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[>=stealth, scale=1.6]
+  % Cell edges
+  \draw[gray] (0,0) rectangle (2,2);
+
+  % Pressure node (cell centre)
+  \filldraw[blue!80!black] (1,1) circle (2.2pt)
+    node[above right=2pt, blue!80!black] {$p_{I}$};
+
+  % ux faces (left and right)
+  \draw[->, red!80!black, thick] (-0.05,1) -- (0.35,1);
+  \node[left=2pt, red!80!black] at (0,1) {$u^x_{I}$};
+
+  \draw[->, red!80!black, thick] (1.95,1) -- (2.35,1);
+  \node[right=2pt, red!80!black] at (2.4,1) {$u^x_{I+\delta_1}$};
+
+  % uy faces (bottom and top)
+  \draw[->, green!50!black, thick] (1,-0.05) -- (1,0.35);
+  \node[below=2pt, green!50!black] at (1,-.05) {$u^y_{I}$};
+
+  \draw[->, green!50!black, thick] (1,1.95) -- (1,2.35);
+  \node[above=2pt, green!50!black] at (1,2.4) {$u^y_{I+\delta_2}$};
+
+  % Corner nodes for reference
+  \foreach \x in {0,2} \foreach \y in {0,2}
+    \filldraw[gray!60] (\x,\y) circle (1pt);
+
+  % Axis labels
+  \draw[->] (-0.5,-0.5) -- (2.7,-0.5) node[right] {$x_1$};
+  \draw[->] (-0.5,-0.5) -- (-0.5,2.7) node[above] {$x_2$};
+\end{tikzpicture}
+\caption{MAC staggered grid stencil for one cell.
+  Pressure (\textcolor{blue!80!black}{$\bullet$}) is stored at the cell
+  centre; $x$-velocity (\textcolor{red!80!black}{$\to$}) at left/right
+  faces; $y$-velocity (\textcolor{green!50!black}{$\uparrow$}) at
+  bottom/top faces.}
+\label{fig:mac}
+\end{figure}
+
+This staggering has two key advantages for incompressible flow:
+\begin{enumerate}
+  \item \textbf{No checkerboard pressure modes.}  On a collocated grid
+    the discrete Laplacian couples only every other cell, admitting a
+    spurious oscillatory pressure mode.  The MAC layout couples every
+    neighbouring cell through the face velocities, eliminating this
+    instability without Rhie--Chow interpolation or pressure filtering.
+  \item \textbf{Exact discrete adjointness.}  The discrete divergence
+    $\vect{D}$ and negative gradient $-\vect{G}$ are transposes of each
+    other ($\vect{D} = -\vect{G}^{\top}$), so the Poisson operator
+    $\vect{D}\,\mu_0\,\vect{G}$ is symmetric by construction.
+\end{enumerate}
+
+\subsection{Grid dimensions and ghost cells}
+
+For a domain of $N_1\times N_2$ interior cells, the arrays have size
+$\bar N_k = N_k + 2$ (one ghost cell on each side).  The index ranges
+for interior DOFs are:
+
+\begin{itemize}
+  \item \textbf{Interior pressure cells:}
+    $I\in[2,\bar N_1{-}1]\times[2,\bar N_2{-}1]$.
   \item \textbf{Interior velocity faces (component $i$):}
     $I_k\in\begin{cases}[3,\bar N_k{-}1]&k=i,\\[2pt][2,\bar N_k{-}1]&k\neq i.\end{cases}$
 \end{itemize}
 
-The discrete gradient operator $\partial_i$ and divergence operator $\operatorname{div}$ are
-\begin{equation}
+\noindent
+The velocity range starts at index~3 (not~2) in its own direction
+because the face at index~2 sits on the domain boundary and is
+prescribed by the Dirichlet boundary condition.
+
+\subsection{Discrete operators}
+
+The staggered placement gives compact, second-order discrete operators.
+The gradient (cell centres $\to$ faces) and divergence (faces $\to$
+cell centres) are
+\begin{equation}\label{eq:grad_div}
   \partial_i p_I = p_I - p_{I-\delta_i},
   \qquad
   \operatorname{div}(I, \vect{u}) = \sum_{i=1}^{D}(u_{I+\delta_i,\,i} - u_{I,i}).
@@ -103,13 +237,183 @@ for diffusion:
 \end{equation}
 where $\phi^u_j$ is the CDS flux $\phi^u = \bar u\cdot\tfrac{1}{2}(u_L+u_R)$.
 
+\subsection{Discretised governing equations in residual form}
+
+Combining the BDIM predictor~\eqref{eq:bdim_pred} and pressure
+projection~\eqref{eq:proj} with the discrete operators above, the
+time-discrete, space-discrete system can be written as a set of
+algebraic residual equations $\vect{R} = \vect{0}$.
+
+\paragraph{Semi-discrete momentum (before projection).}
+Applying forward Euler in time and the simplified BDIM to
+Eq.~\eqref{eq:momentum}, the predicted velocity at face $(I,i)$ is
+\begin{equation}\label{eq:disc_pred}
+  u^{*}_{I,i}
+  = \mu_{0,I,i}\Bigl(
+      u^{n}_{I,i}
+      + \Delta t\,f^{n}_{I,i}
+    \Bigr),
+\end{equation}
+where the explicit right-hand side $f^{n}_{I,i}$ collects convection
+and diffusion evaluated at $\vect{u}^n$.  Expanding $f$ in conservative
+flux form:
+\begin{equation}\label{eq:disc_rhs}
+  f^{n}_{I,i}
+  = -\sum_{j=1}^{D}\Bigl[
+      \underbrace{%
+        \phi^{u}_{j}(I,i)\big|_{\vect{u}^n}
+      }_{\text{convective flux}}
+      -\;
+      \underbrace{%
+        \nu\,\bigl(u^{n}_{I+\delta_j,\,i} - 2\,u^{n}_{I,i} + u^{n}_{I-\delta_j,\,i}\bigr)
+      }_{\text{diffusive flux}}
+    \Bigr],
+\end{equation}
+where $\phi^{u}_{j}$ is the CDS convective flux through the $j$-face
+of the momentum control volume,
+\begin{equation}
+  \phi^{u}_{j}(I,i)\big|_{\vect{u}^n}
+  = \bar{u}^{n}_{j}\;\tfrac{1}{2}\bigl(u^{n}_{I-\delta_j,\,i} + u^{n}_{I,i}\bigr),
+  \qquad
+  \bar{u}^{n}_{j} = \tfrac{1}{2}\bigl(u^{n}_{I,j} + u^{n}_{I-\delta_i,\,j}\bigr),
+\end{equation}
+with $\bar{u}^{n}_{j}$ the face-averaged advecting velocity
+interpolated to the flux location.
+
+\paragraph{Pressure projection.}
+The projection corrects $\vect{u}^*$ to enforce the discrete continuity
+constraint.  Substituting $\phi = \Delta t\,p^{n+1}$
+into~\eqref{eq:proj}:
+\begin{equation}\label{eq:disc_proj}
+  u^{n+1}_{I,i}
+  = u^{*}_{I,i}
+  - \mu_{0,I,i}\,\Delta t\,\bigl(p^{n+1}_{I} - p^{n+1}_{I-\delta_i}\bigr).
+\end{equation}
+
+\paragraph{Momentum residual.}
+Substituting~\eqref{eq:disc_pred} into~\eqref{eq:disc_proj} and
+rearranging to place all unknowns at $t^{n+1}$ on the left:
+\begin{equation}\label{eq:disc_mom_res}
+  \boxed{%
+  R^{\mathrm{mom}}_{I,i}
+  \;\equiv\;
+  u^{n+1}_{I,i}
+  \;-\;
+  \mu_{0,I,i}\bigl(u^{n}_{I,i} + \Delta t\,f^{n}_{I,i}\bigr)
+  \;+\;
+  \Delta t\,\mu_{0,I,i}\,
+    \bigl(p^{n+1}_I - p^{n+1}_{I-\delta_i}\bigr)
+  \;=\; 0.}
+\end{equation}
+This is one scalar equation per interior velocity face.  The three
+groups correspond to: the new velocity (implicit), the BDIM predictor
+(explicit in $\vect{u}^n$), and the pressure gradient (implicit in
+$p^{n+1}$).
+
+\paragraph{Continuity residual.}
+The discrete incompressibility constraint at each interior pressure
+cell~$I$ is
+\begin{equation}\label{eq:disc_cont_res}
+  \boxed{%
+  R^{\mathrm{cont}}_{I}
+  \;\equiv\;
+  \sum_{i=1}^{D}\bigl(u^{n+1}_{I+\delta_i,\,i} - u^{n+1}_{I,i}\bigr)
+  \;=\; 0.}
+\end{equation}
+
+\paragraph{Coupled system.}
+Equations~\eqref{eq:disc_mom_res}--\eqref{eq:disc_cont_res} form a
+saddle-point system in the unknowns
+$(\vect{u}^{n+1},\,p^{n+1})$.  In matrix notation:
+\begin{equation}\label{eq:saddle}
+  \underbrace{%
+    \begin{bmatrix}
+      \vect{I} & \Delta t\,\operatorname{diag}(\mu_0)\,\vect{G} \\[4pt]
+      \vect{D} & \vect{0}
+    \end{bmatrix}
+  }_{\displaystyle\vect{J}}
+  \begin{bmatrix} \vect{u}^{n+1} \\ p^{n+1} \end{bmatrix}
+  =
+  \begin{bmatrix}
+    \operatorname{diag}(\mu_0)\bigl(\vect{u}^{n}+\Delta t\,\vect{f}^{n}\bigr) \\[4pt]
+    \vect{0}
+  \end{bmatrix},
+\end{equation}
+where $\vect{G}$ is the discrete gradient, $\vect{D}$ the discrete
+divergence, and $\vect{I}$ the identity on interior velocity DOFs.
+The forward solver does not form this system explicitly; instead it
+evaluates the predictor~\eqref{eq:disc_pred}, solves the Poisson
+equation $\vect{D}\,\operatorname{diag}(\mu_0)\,\vect{G}\,p
+= \vect{D}\,\vect{u}^{*}/\Delta t$ via multigrid, and applies the
+correction~\eqref{eq:disc_proj}.  The residual
+form~\eqref{eq:disc_mom_res}--\eqref{eq:disc_cont_res} is used only
+by the adjoint solver, which requires $\vect{R}=\vect{0}$ and the
+Jacobian $\pp\vect{R}/\pp\vect{y}$.
+
 %----------------------------------------------------------------------
 \section{Boundary Conditions}
 %----------------------------------------------------------------------
 
+Figure~\ref{fig:bc_layout} illustrates the boundary treatment for
+a row of cells near the left ($x_1$) boundary.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[>=stealth, scale=1.3, font=\small]
+  % Draw 4 cells
+  \foreach \col in {0,1,2,3} {
+    \draw[gray] (\col,0) rectangle (\col+1,1.2);
+  }
+  % Ghost cell shading
+  \fill[red!8] (0,0) rectangle (1,1.2);
+  % Labels above cells
+  \node[above, font=\footnotesize] at (0.5,1.2) {ghost};
+  \node[above, font=\footnotesize] at (1.5,1.2) {bdy face};
+  \node[above, font=\footnotesize] at (2.5,1.2) {interior};
+  \node[above, font=\footnotesize] at (3.5,1.2) {interior};
+  % Index labels below cells
+  \node[below=1pt, font=\scriptsize, gray] at (0.5,0) {$I_1{=}1$};
+  \node[below=1pt, font=\scriptsize, gray] at (1.5,0) {$I_1{=}2$};
+  \node[below=1pt, font=\scriptsize, gray] at (2.5,0) {$I_1{=}3$};
+  \node[below=1pt, font=\scriptsize, gray] at (3.5,0) {$I_1{=}4$};
+  % Pressure nodes at cell centres
+  \foreach \col in {0,1,2,3} {
+    \filldraw[blue!70!black] (\col+0.5,0.6) circle (1.6pt);
+  }
+  % ux faces as arrows (at y=0.6, between cells)
+  \foreach \col in {0,1,2,3,4} {
+    \draw[->, red!70!black, thick] (\col-0.04,0.6) -- (\col+0.22,0.6);
+  }
+  % Domain boundary line
+  \draw[very thick, black] (1,-0.05) -- (1,1.25);
+  \node[above right=-1pt, font=\scriptsize, rotate=90] at (1.02,0.0) {wall};
+  % Dirichlet annotation (below, pointing at face I1=1 and I1=2)
+  \draw[<-, thick, black!60] (0.0,0.6) -- (-0.3,-0.6)
+    node[below right, font=\footnotesize, align=left]
+    {$u^x = U_1^{\mathrm{BC}}$ (Dirichlet)};
+  \draw[<-, thick, black!60] (1.0,0.6) -- (-0.0,-0.6);
+  % Neumann annotation (above, for uy)
+  \draw[->, green!50!black, thick] (0.5,1.0) -- (0.5,1.15);
+  \draw[->, green!50!black, thick] (1.5,1.0) -- (1.5,1.15);
+  \draw[<->, thick, orange!70!black] (0.58,1.55) -- (1.42,1.55);
+  \node[above, font=\footnotesize, orange!70!black] at (1.0, 1.55)
+    {$u^y_{\mathrm{ghost}} = u^y_{\mathrm{int}}$ (Neumann)};
+  \draw[dashed, orange!70!black] (0.5,1.15) -- (0.5,1.55);
+  \draw[dashed, orange!70!black] (1.5,1.15) -- (1.5,1.55);
+\end{tikzpicture}
+\caption{Boundary treatment near the left wall for $u_x$ (Dirichlet,
+  \textcolor{red!70!black}{$\to$}) and $u_y$ (Neumann,
+  \textcolor{green!50!black}{$\uparrow$}).
+  The ghost cell at $I_1{=}1$ and the boundary face at $I_1{=}2$ are
+  both set to $U_1^{\mathrm{BC}}$ for the normal component.
+  Tangential components copy the interior neighbour (zero gradient).}
+\label{fig:bc_layout}
+\end{figure}
+
 \begin{itemize}
   \item \textbf{Velocity, normal component (Dirichlet):}
-    $u_{I,i} = U_i^{\mathrm{BC}}$ at boundary faces in direction $i$.
+    $u_{I,i} = U_i^{\mathrm{BC}}$ at boundary faces in direction $i$
+    (indices 1, 2, and $\bar N_i$ in direction~$i$).
   \item \textbf{Velocity, tangential component (Neumann):}
     $u_{\text{ghost},i} = u_{\text{interior},i}$ (zero-gradient).
   \item \textbf{Pressure (Neumann):}
@@ -164,10 +468,14 @@ reverse-mode algorithmic differentiation~\cite{Martins2021}.
 \State $p \gets \phi / \Delta t$
 \State Apply velocity BCs: \texttt{BC!}$(\vect{u}^{n+1},\,\vect{U}^{\mathrm{BC}})$
 \Statex
-\Comment{\textit{Pressure pinning (removes constant null space)}}
+\Comment{\textit{Pressure pinning}}
 \State $p_{\mathrm{ref}} \gets p_{I_{\mathrm{pin}}}$
 \ForAll{interior pressure cells $I$}
-  \State $p_I \gets p_I - p_{\mathrm{ref}}$
+  \If{$d(\vect{x}_{\mathrm{center}}(I)) < -(\epsilon+\tfrac{1}{2})$}
+    \State $p_I \gets 0$ \Comment{Body-interior: pressure indeterminate}
+  \Else
+    \State $p_I \gets p_I - p_{\mathrm{ref}}$ \Comment{Fluid: remove constant mode}
+  \EndIf
 \EndFor
 \State Pack $\vect{y}^{n+1} \gets [\vect{u}^{n+1};\,p^{n+1}]$
 \end{algorithmic}
@@ -317,6 +625,83 @@ the continuity equation:
   \;\;\text{or}\;\;
   d\bigl(\vect{x}_{\mathrm{center}}(I)\bigr) < -\bigl(\epsilon + \tfrac{1}{2}\bigr).
 \end{equation}
+
+Figure~\ref{fig:pinning} illustrates the two types of pinned cells.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[>=stealth, scale=0.52, font=\small]
+  % Continuity cells (background, drawn first)
+  \foreach \x in {1,...,14} {
+    \foreach \y in {1,...,6} {
+      \fill[green!8] (\x,\y) rectangle (\x+1,\y+1);
+    }
+  }
+  % Domain grid
+  \foreach \x in {0,...,16} \draw[gray!25] (\x,0) -- (\x,8);
+  \foreach \y in {0,...,8}  \draw[gray!25] (0,\y) -- (16,\y);
+  \draw[very thick] (0,0) rectangle (16,8);
+
+  % Body fill (circle at centre 5,4, radius 3.5)
+  \fill[red!12] (5,4) circle (3.5);
+
+  % Body-interior pinned cells: d(x_center) < -(eps + 1/2) = -1.5
+  % Body radius = 3.5, so pinned cells have centre within 3.5 - 1.5 = 2.0
+  % of body centre (5,4). Cell centres are at (x+0.5, y+0.5).
+  % dist((3.5,2.5),(5,4)) = 2.12 > 2  -- not pinned
+  % dist((3.5,3.5),(5,4)) = 1.58 < 2  -- pinned
+  \foreach \x/\y in {
+    3/3, 3/4,
+    4/2, 4/3, 4/4, 4/5,
+    5/2, 5/3, 5/4, 5/5,
+    6/3, 6/4%
+  } {
+    \fill[red!35] (\x,\y) rectangle (\x+1,\y+1);
+  }
+
+  % Body surface
+  \draw[very thick, red!60!black] (5,4) circle (3.5);
+  % Immersion band (outer, at d = +epsilon = +1)
+  \draw[dashed, orange!60!black, thick] (5,4) circle (4.5);
+
+  % Reference pin cell (in fluid, well away from body)
+  \fill[blue!25] (11,4) rectangle (12,5);
+  \node[font=\small, blue!80!black] at (11.5,4.5) {$I_{\mathrm{pin}}$};
+
+  % Legend (to the right of domain)
+  \begin{scope}[shift={(17.5,0)}]
+    \fill[red!35] (0,6.5) rectangle (0.8,7.1);
+    \node[right, font=\footnotesize] at (1.0,6.8) {body-interior pin: $R = p_I$};
+    \fill[blue!25] (0,5.4) rectangle (0.8,6.0);
+    \node[right, font=\footnotesize] at (1.0,5.7) {reference pin: $R = p_I$};
+    \fill[green!8] (0,4.3) rectangle (0.8,4.9);
+    \draw[gray!40] (0,4.3) rectangle (0.8,4.9);
+    \node[right, font=\footnotesize] at (1.0,4.6)
+      {continuity: $R = \operatorname{div}(\vect{u})$};
+    \draw[very thick, red!60!black] (0.4,3.5) circle (0.3);
+    \node[right, font=\footnotesize] at (1.0,3.5) {body surface ($d=0$)};
+    \draw[dashed, orange!60!black, thick] (0,2.7) -- (0.8,2.7);
+    \node[right, font=\footnotesize] at (1.0,2.7)
+      {immersion band ($|d|=\epsilon$)};
+  \end{scope}
+
+  % mu0 annotations (pointing into body / fluid)
+  \node[font=\footnotesize, red!60!black] at (1.5,1.5) {$\mu_0=0$};
+  \draw[->, red!60!black] (2.3,1.8) -- (3.2,2.6);
+  \node[font=\footnotesize, blue!60!black] at (13.5,6.5) {$\mu_0=1$};
+  \draw[->, blue!60!black] (13.0,6.3) -- (12.2,5.5);
+\end{tikzpicture}
+\caption{Pressure DOF classification on a sample domain with an immersed
+  circular body (radius~$3.5$, $\epsilon=1$).
+  Cells deep inside the body (\textcolor{red!60!black}{red},
+  $d<-1.5$) have $\mu_0=0$ on all surrounding faces, making their
+  pressure indeterminate --- these are pinned to $p=0$.
+  One fluid-region cell (\textcolor{blue!70!black}{blue}) is the
+  reference pin $I_{\mathrm{pin}}$ that removes the constant null space.
+  All other interior cells (\textcolor{green!50!black}{green}) satisfy
+  the continuity equation $R = \operatorname{div}(\vect{u})$.}
+\label{fig:pinning}
+\end{figure}
 
 \begin{itemize}
   \item \textbf{Reference pin} ($I_{\mathrm{pin}}$, one cell):
@@ -531,6 +916,13 @@ where $n_x\gg n_f$~\cite{Martins2021}.
 
 %----------------------------------------------------------------------
 \begin{thebibliography}{9}
+\bibitem{Harlow1965}
+  F.~H.~Harlow and J.~E.~Welch,
+  ``Numerical calculation of time-dependent viscous incompressible flow of
+  fluid with free surface,''
+  \emph{Phys.\ Fluids}, vol.~8, no.~12, pp.~2182--2189, 1965.
+  \texttt{doi:10.1063/1.1761178}.
+
 \bibitem{Maertens2015}
   A.~P.~Maertens and G.~D.~Weymouth,
   ``Accurate Cartesian-grid simulations of near-body flows at intermediate
